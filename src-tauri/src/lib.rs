@@ -910,12 +910,19 @@ fn get_agent_hooks_config(state: State<'_, AppState>) -> String {
     }
 }
 
+/// Imported sprite characters live in `%APPDATA%\kuro-cat-pet\skins` and are not
+/// part of the built-in catalog, so `cat_exists` would otherwise reject them and
+/// silently reset the selection back to `black`.
+fn is_sprite_breed(id: &str) -> bool {
+    id.starts_with("sprite-")
+}
+
 #[tauri::command]
 fn update_settings(app: AppHandle, state: State<'_, AppState>, mut patch: AppSettings) -> AppSettings {
     patch.scale = patch.scale.clamp(0.20, 1.50);
     patch.opacity = config::normalize_opacity(patch.opacity);
     let clean_breed = sanitize_cat_id(&patch.cat_breed);
-    patch.cat_breed = if cat_exists(&clean_breed) {
+    patch.cat_breed = if cat_exists(&clean_breed) || is_sprite_breed(&clean_breed) {
         clean_breed
     } else {
         "black".to_string()
@@ -2548,7 +2555,7 @@ fn quit_app(app: AppHandle) {
 
 pub fn apply_breed_and_save(app: &AppHandle, breed: &str) {
     let clean = sanitize_cat_id(breed);
-    let normalized = if cat_exists(&clean) {
+    let normalized = if cat_exists(&clean) || is_sprite_breed(&clean) {
         clean
     } else {
         "black".to_string()

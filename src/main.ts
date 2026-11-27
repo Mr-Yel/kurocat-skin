@@ -12,7 +12,7 @@ import {
 import { catAudio } from './audio';
 import { AgentCompanionController, type AgentCompanionEvent } from './agentCompanion';
 import { DEFAULT_BUILTIN_CATS, type CatSkinConfig } from './catSkins';
-import { loadCustomSkin, type AppliedSkin } from './customSkin';
+import { discoverCharacters, isSpriteId, type SkinCharacter } from './customSkin';
 import {
   getKeyboardLayout,
   resolveKeyByVk,
@@ -172,8 +172,8 @@ let settings: AppSettings = {
 };
 
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
-/** Runtime sprite skin loaded from %APPDATA%/skins, null when absent. */
-let customSkin: AppliedSkin | null = null;
+/** Sprite characters discovered under %APPDATA%\kuro-cat-pet\skins. */
+let spriteCharacters: SkinCharacter[] = [];
 
 const canvas = document.getElementById('pet-canvas') as HTMLCanvasElement;
 let canvas3d = document.getElementById('pet-canvas-3d') as HTMLCanvasElement;
@@ -317,8 +317,80 @@ function schedule3dDisposeIf2D(): void {
   }, IDLE_3D_DISPOSE_MS);
 }
 
+/** The built-in Bigfish and every imported sprite character share the 2D renderer. */
+function isSpriteBreed(id: string): boolean {
+  return id === 'dafeiyu' || isSpriteId(id);
+}
+
+/** Re-attach imported characters to the breed catalog (Rust can push a fresh list). */
+function mergeSpriteCharacters(): void {
+  catList = catList.filter((c) => !isSpriteId(c.id));
+  for (const ch of spriteCharacters) {
+    if (catList.some((c) => c.id === ch.id)) continue;
+    catList.push({
+      id: ch.id,
+      name: ch.name,
+      emoji: '🐾',
+      builtin: false,
+      furColor: '#c8f538',
+      eyeColorTop: '#222b2f',
+      accentColor: '#7ac7ff',
+    });
+  }
+}
+
+function findActiveCharacter(): SkinCharacter | null {
+  return spriteCharacters.find((c) => c.id === settings.catBreed) ?? null;
+}
+
+let spritesLoaded = false;
+let settingsLoaded = false;
+
+/**
+ * Imported characters and persisted settings load in parallel, so either side
+ * can finish first. Both call this; it no-ops until both are ready and then
+ * fixes up the selection exactly once.
+ */
+function reconcileSpriteSelection(): void {
+  if (!spritesLoaded || !settingsLoaded) return;
+  const first = spriteCharacters[0];
+  if (!first) return;
+
+  const MIGRATION_KEY = 'kurocat.sprite.migrated';
+  let migrated = false;
+  try {
+    migrated = window.localStorage.getItem(MIGRATION_KEY) === '1';
+  } catch {
+    /* storage unavailable, treat as not migrated */
+  }
+
+  let changed = false;
+  // Older builds hijacked the Bigfish slot, so a saved 'dafeiyu' can be a
+  // leftover the user never picked. Move them onto the imported character once.
+  if (settings.catBreed === 'dafeiyu' && !migrated) {
+    settings.catBreed = first.id;
+    changed = true;
+    try {
+      window.localStorage.setItem(MIGRATION_KEY, '1');
+    } catch {
+      /* ignore */
+    }
+  }
+  // A saved character that no longer exists falls back to the first one.
+  if (isSpriteId(settings.catBreed) && !findActiveCharacter()) {
+    settings.catBreed = first.id;
+    changed = true;
+  }
+
+  if (!changed) return;
+  mergeSpriteCharacters();
+  syncMenuUI();
+  activateRenderEngine();
+  void invoke('update_settings', { patch: settings }).catch(() => {});
+}
+
 function shouldWearHeadphonesNow(): boolean {
-  if (settings.catBreed === 'dafeiyu') return false;
+  if (isSpriteBreed(settings.catBreed)) return false;
   const hm: HeadphoneMode =
     settings.headphoneMode === 'auto' || settings.headphoneMode === 'on'
       ? settings.headphoneMode
@@ -331,7 +403,7 @@ function shouldWearHeadphonesNow(): boolean {
 function wants3DNow(): boolean {
   return (
     settings.renderMode !== '2d' &&
-    settings.catBreed !== 'dafeiyu' &&
+    !isSpriteBreed(settings.catBreed) &&
     !tailPickerOpen &&
     !isWin7Ulw &&
     !webgl3dUnavailable
@@ -461,6 +533,8 @@ function formatHeaderCatName(cat: CatSkinConfig): string {
     cat.emoji && displayName.startsWith(cat.emoji)
       ? displayName.slice(cat.emoji.length).trimStart()
       : displayName;
+  // Imported characters are not KuroCat-builtin breeds, so drop the prefix.
+  if (isSpriteId(cat.id)) return `${emoji} ${bareName}`;
   return `${emoji} KuroCat ${bareName}`;
 }
 
@@ -610,11 +684,11 @@ function syncMenuUI(): void {
   });
   const renderModeRowEl = document.getElementById('render-mode-row');
   if (renderModeRowEl) {
-    renderModeRowEl.classList.toggle('hidden', settings.catBreed === 'dafeiyu');
+    renderModeRowEl.classList.toggle('hidden', isSpriteBreed(settings.catBreed));
   }
   const collarRowEl = document.getElementById('collar-row');
   if (collarRowEl) {
-    collarRowEl.classList.toggle('hidden', renderMode === '2d' || settings.catBreed === 'dafeiyu');
+    collarRowEl.classList.toggle('hidden', renderMode === '2d' || isSpriteBreed(settings.catBreed));
   }
 
   const headphoneMode: HeadphoneMode =
@@ -626,7 +700,7 @@ function syncMenuUI(): void {
   });
   const headphoneRowEl = document.getElementById('headphone-row');
   if (headphoneRowEl) {
-    headphoneRowEl.classList.toggle('hidden', settings.catBreed === 'dafeiyu');
+    headphoneRowEl.classList.toggle('hidden', isSpriteBreed(settings.catBreed));
   }
 
   const headerEl = document.getElementById('menu-header');
@@ -642,8 +716,9 @@ function syncMenuUI(): void {
 
   const fpsCapNum = settings.fpsCap === 30 ? 30 : 0;
   engine.showKeyBubbles = settings.showKeyBubbles;
-  if (customSkin) {
-    engine.setCustomSpriteSkin(customSkin.sources, customSkin.options);
+  const activeCharacter = findActiveCharacter();
+  if (activeCharacter) {
+    engine.setCustomSpriteSkin(activeCharacter.sources, activeCharacter.options);
     engine.setCatAppearance('dafeiyu');
   } else {
     engine.setCustomSpriteSkin(null);
@@ -1148,9 +1223,12 @@ async function bootstrap(): Promise<void> {
     ]);
     settings = loadedSettings;
     adminStatus = loadedAdmin;
+    settingsLoaded = true;
+    reconcileSpriteSelection();
     lastKnownLockState = settings.clickThroughLocked;
     if (Array.isArray(loadedCats) && loadedCats.length > 0) {
       catList = loadedCats;
+      mergeSpriteCharacters();
     }
     if (loadedVer) {
       appVersion = loadedVer;
@@ -1162,6 +1240,8 @@ async function bootstrap(): Promise<void> {
     syncMenuUI();
   } catch (err) {
     console.error('Failed to load settings or cats:', err);
+    settingsLoaded = true;
+    reconcileSpriteSelection();
   }
 
   await listen<UpdateProgressEvent>('kuro-update-status', (ev) => {
@@ -1307,6 +1387,7 @@ async function bootstrap(): Promise<void> {
   await listen<CatSkinConfig[]>('kuro-cats', (ev) => {
     if (Array.isArray(ev.payload) && ev.payload.length > 0) {
       catList = ev.payload;
+      mergeSpriteCharacters();
       syncMenuUI();
     }
   });
@@ -2093,21 +2174,16 @@ void bootstrap();
 // missing Rust-side API can never block it (and vice versa).
 void (async () => {
   try {
-    customSkin = await loadCustomSkin();
-    if (!customSkin) return;
-    console.info('[KuroCat] custom skin loaded:', customSkin.name, customSkin.origin);
-    // The sprite renderer lives on the 2D engine; force it on and repaint.
-    settings.catBreed = 'dafeiyu';
-    engine.setCustomSpriteSkin(customSkin.sources, customSkin.options);
-    engine.setCatAppearance('dafeiyu');
+    spriteCharacters = await discoverCharacters();
+    spritesLoaded = true;
+    if (spriteCharacters.length === 0) return;
+    mergeSpriteCharacters();
+    syncMenuUI();
     activateRenderEngine();
-    try {
-      syncMenuUI();
-    } catch (err) {
-      console.warn('[KuroCat] menu sync skipped', err);
-    }
+    reconcileSpriteSelection();
   } catch (err) {
-    customSkin = null;
-    console.warn('[KuroCat] custom skin skipped', err);
+    spriteCharacters = [];
+    spritesLoaded = true;
+    console.warn('[KuroCat] sprite discovery skipped', err);
   }
 })();
