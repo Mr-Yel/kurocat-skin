@@ -91,7 +91,19 @@ export async function loadCustomSkin(): Promise<AppliedSkin | null> {
       dir ? convertFileSrc(await join(dir, file)) : `${base}/${file}`;
     try {
       const idle = await urlOf('idle.png');
-      if (!(await probe(idle))) return null;
+      if (!(await probe(idle))) {
+        // Keep this loud: a 403 here almost always means the asset-protocol
+        // scope in tauri.conf.json does not cover `dir`.
+        let status = 'no-fetch';
+        try {
+          status = String((await fetch(idle, { cache: 'no-store' })).status);
+        } catch (err) {
+          status = `fetch-error:${String(err).slice(0, 80)}`;
+        }
+        console.warn('[KuroCat] sprite probe failed', { dir: dir ?? base, idle, status });
+        return null;
+      }
+      console.info('[KuroCat] sprite probe ok', { dir: dir ?? base, idle });
 
       const sources = { idle } as SpriteSources;
       const rest = await Promise.all(
@@ -111,22 +123,29 @@ export async function loadCustomSkin(): Promise<AppliedSkin | null> {
         options: meta.options,
         origin: dir ?? base ?? '',
       };
-    } catch {
+    } catch (err) {
+      console.warn('[KuroCat] sprite attempt threw', dir ?? base, String(err).slice(0, 200));
       return null;
     }
   };
 
   if (base) return attempt(null);
-  if (!isTauriRuntime()) return null;
+  if (!isTauriRuntime()) {
+    console.info('[KuroCat] not a tauri runtime, custom skin skipped');
+    return null;
+  }
 
   try {
     const root = await dataDir();
+    console.info('[KuroCat] dataDir =', root);
     for (const parts of SKIN_DIR_CANDIDATES) {
-      const hit = await attempt(await join(root, ...parts));
+      const candidate = await join(root, ...parts);
+      const hit = await attempt(candidate);
       if (hit) return hit;
     }
     return await attempt(await join(await appDataDir(), 'skins'));
-  } catch {
+  } catch (err) {
+    console.warn('[KuroCat] custom skin resolution failed', String(err).slice(0, 200));
     return null;
   }
 }

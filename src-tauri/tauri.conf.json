@@ -32,7 +32,14 @@
       "csp": null,
       "assetProtocol": {
         "enable": true,
-        "scope": ["$APPDATA", "$APPDATA/**"]
+        "scope": [
+          "$APPDATA",
+          "$APPDATA/**",
+          "$DATA/kuro-cat-pet",
+          "$DATA/kuro-cat-pet/**",
+          "$DATA/com.kurocat.pet",
+          "$DATA/com.kurocat.pet/**"
+        ]
       }
     }
   },
