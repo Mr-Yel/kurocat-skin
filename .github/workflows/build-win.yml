@@ -8,7 +8,7 @@ on:
       - 'v*'
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   build-windows:
@@ -56,3 +56,22 @@ jobs:
           name: kurocat-windows-installer
           path: out/KuroCat-custom-skin-setup.exe
           if-no-files-found: error
+
+      - name: Publish release asset
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/KuroCat-custom-skin-setup.exe
+          name: KuroCat 自定义形象版 ${{ github.ref_name }}
+          body: |
+            Windows x64 安装包（NSIS，未签名，SmartScreen 会拦一次，选「更多信息 → 仍要运行」）。
+
+            ### 换形象怎么用
+            1. 安装并启动一次，再**完全退出**（托盘右键退出），让程序生成 `%APPDATA%\com.kurocat.pet`。
+            2. 把 4 帧 PNG（`idle/blink/shy/happy`，建议 224×278 透明底）和 `skin.json` 放进 `%APPDATA%\com.kurocat.pet\skins\`。
+            3. 重新启动，检测到 `idle.png` 即启用 2D 精灵形象。
+            4. 不需要重新编译，换图即生效。
+
+            `skin.json` 可选开关：`hands` / `tail` / `eyeGaze` / `blush`（默认全关，避免程序化部件穿帮）。
+          draft: false
+          prerelease: true
