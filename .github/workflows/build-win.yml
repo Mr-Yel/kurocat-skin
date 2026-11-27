@@ -1,0 +1,58 @@
+name: Build Windows Installer
+
+# 手动触发：Actions 页面点 "Run workflow"，或用 push tag 触发。
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+
+      - name: Install frontend deps
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: Build NSIS installer
+        run: npm run tauri -- build --bundles nsis
+
+      - name: Collect artifact
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "src-tauri/target/release/bundle/nsis/*-setup.exe" | Select-Object -First 1
+          if (-not $exe) { throw "installer not found" }
+          New-Item -ItemType Directory -Force -Path out | Out-Null
+          Copy-Item $exe.FullName "out/KuroCat-custom-skin-setup.exe"
+          Write-Host "artifact: $($exe.Name) $([math]::Round($exe.Length/1MB,2)) MB"
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: kurocat-windows-installer
+          path: out/KuroCat-custom-skin-setup.exe
+          if-no-files-found: error
