@@ -15,7 +15,7 @@
  * The same loader accepts `?skins=<url-prefix>` so the browser dev server can
  * preview a skin without a Tauri runtime.
  */
-import { appDataDir, join } from '@tauri-apps/api/path';
+import { appDataDir, dataDir, join } from '@tauri-apps/api/path';
 import { convertFileSrc } from '@tauri-apps/api/core';
 import type { SpriteOptions, SpriteSources } from './dafeiyuRenderer';
 
@@ -72,45 +72,60 @@ async function readMeta(urlOf: (file: string) => Promise<string>): Promise<{
   }
 }
 
+/**
+ * KuroCat 的 Rust 端没有用 Tauri 的 `app_data_dir()`，而是在 `config.rs` 里自己拼了
+ * `%APPDATA%\kuro-cat-pet`。而前端 `appDataDir()` 拿到的是 identifier 目录
+ * `%APPDATA%\com.kurocat.pet`。两者不同，所以两个位置都要试。
+ */
+const SKIN_DIR_CANDIDATES: ReadonlyArray<readonly string[]> = [
+  ['kuro-cat-pet', 'skins'],
+  ['com.kurocat.pet', 'skins'],
+];
+
 export async function loadCustomSkin(): Promise<AppliedSkin | null> {
   const devBase = new URLSearchParams(window.location.search).get('skins');
-  let base: string | null = devBase ? devBase.replace(/\/+$/, '') : null;
-  let dir: string | null = null;
+  const base: string | null = devBase ? devBase.replace(/\/+$/, '') : null;
 
-  if (!base) {
-    if (!isTauriRuntime()) return null;
+  const attempt = async (dir: string | null): Promise<AppliedSkin | null> => {
+    const urlOf = async (file: string): Promise<string> =>
+      dir ? convertFileSrc(await join(dir, file)) : `${base}/${file}`;
     try {
-      dir = await join(await appDataDir(), 'skins');
+      const idle = await urlOf('idle.png');
+      if (!(await probe(idle))) return null;
+
+      const sources = { idle } as SpriteSources;
+      const rest = await Promise.all(
+        (['blink', 'shy', 'happy'] as const).map(async (key) => {
+          const url = await urlOf(`${key}.png`);
+          return { key, url, ok: await probe(url) };
+        }),
+      );
+      for (const item of rest) {
+        sources[item.key] = item.ok ? item.url : idle;
+      }
+
+      const meta = await readMeta(urlOf);
+      return {
+        name: meta.name,
+        sources,
+        options: meta.options,
+        origin: dir ?? base ?? '',
+      };
     } catch {
       return null;
     }
-  }
+  };
 
-  const urlOf = async (file: string): Promise<string> =>
-    dir ? convertFileSrc(await join(dir, file)) : `${base}/${file}`;
+  if (base) return attempt(null);
+  if (!isTauriRuntime()) return null;
 
   try {
-    const idle = await urlOf('idle.png');
-    if (!(await probe(idle))) return null;
-
-    const sources = { idle } as SpriteSources;
-    const rest = await Promise.all(
-      (['blink', 'shy', 'happy'] as const).map(async (key) => {
-        const url = await urlOf(`${key}.png`);
-        return { key, url, ok: await probe(url) };
-      }),
-    );
-    for (const item of rest) {
-      sources[item.key] = item.ok ? item.url : idle;
+    const root = await dataDir();
+    for (const parts of SKIN_DIR_CANDIDATES) {
+      const hit = await attempt(await join(root, ...parts));
+      if (hit) return hit;
     }
-
-    const meta = await readMeta(urlOf);
-    return {
-      name: meta.name,
-      sources,
-      options: meta.options,
-      origin: dir ?? (base as string),
-    };
+    return await attempt(await join(await appDataDir(), 'skins'));
   } catch {
     return null;
   }
