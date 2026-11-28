@@ -4,6 +4,7 @@ import { PURR_SOUND_MP3_B64 } from './purrSoundData';
 const KEY_DOWN_SLOTS: readonly TypingSoundSlot[] = ['k0', 'k1', 'k2', 'k3', 'k4', 'k5', 'k6', 'k7'];
 const KEY_UP_SLOTS: readonly TypingSoundSlot[] = ['up0', 'up1', 'up2', 'up3'];
 const ALL_TYPING_SLOTS = Object.keys(TYPING_SOUND_WAV_B64) as TypingSoundSlot[];
+type CharacterVoiceMode = 'builtin' | 'silent' | 'custom';
 
 class CatAudio {
   private ctx: AudioContext | null = null;
@@ -17,9 +18,12 @@ class CatAudio {
   private purrFallbackBuffer: AudioBuffer | null = null;
   private purrDecodePromise: Promise<void> | null = null;
   private purrDecodeFailedCtx: AudioContext | null = null;
+  private purrDecodeFailedKey: string | null = null;
   private purrStopTimer: number | null = null;
   private currentIntensity = 0;
   private currentPurrTone: 'normal' | 'chin' | 'knead' = 'normal';
+  private characterVoiceMode: CharacterVoiceMode = 'builtin';
+  private characterVoiceUrl: string | null = null;
   private deviceWatcherAttached = false;
   private rebuildTimer: number | null = null;
   private typingBuffers: Map<TypingSoundSlot, AudioBuffer> | null = null;
@@ -141,6 +145,7 @@ class CatAudio {
     this.purrFallbackBuffer = null;
     this.purrDecodePromise = null;
     this.purrDecodeFailedCtx = null;
+    this.purrDecodeFailedKey = null;
     this.graphReady = false;
     this.typingBuffers = null;
     this.typingDecodePromise = null;
@@ -317,15 +322,40 @@ class CatAudio {
   }
 
   private prewarmPurrBuffer(ctx: AudioContext): void {
-    if (this.purrBuffer || this.purrDecodePromise || this.purrDecodeFailedCtx === ctx) return;
+    const mode = this.characterVoiceMode;
+    const url = this.characterVoiceUrl;
+    const cacheKey = mode === 'custom' ? url : mode === 'builtin' ? 'builtin' : null;
+    if (!cacheKey) return;
+    if (
+      this.purrBuffer ||
+      this.purrDecodePromise ||
+      (this.purrDecodeFailedCtx === ctx && this.purrDecodeFailedKey === cacheKey)
+    ) {
+      return;
+    }
     const targetCtx = ctx;
     const task = (async () => {
       try {
-        const ab = CatAudio.base64ToArrayBuffer(PURR_SOUND_MP3_B64);
+        const ab =
+          mode === 'builtin'
+            ? CatAudio.base64ToArrayBuffer(PURR_SOUND_MP3_B64)
+            : await CatAudio.fetchAudioBuffer(url || '');
         const decoded = await CatAudio.decodeAudioBuffer(targetCtx, ab);
-        if (this.ctx !== targetCtx) return;
-        this.purrBuffer = CatAudio.buildSeamlessPurrBuffer(targetCtx, decoded);
-        // If user is currently petting on the temporary fallback buffer, smoothly swap to real cat audio
+        if (
+          this.ctx !== targetCtx ||
+          this.characterVoiceMode !== mode ||
+          this.characterVoiceUrl !== url
+        ) {
+          return;
+        }
+        this.purrBuffer =
+          mode === 'builtin'
+            ? CatAudio.buildSeamlessPurrBuffer(targetCtx, decoded)
+            : decoded;
+        this.purrDecodeFailedCtx = null;
+        this.purrDecodeFailedKey = null;
+        // If the user is already petting, swap the temporary built-in fallback for
+        // the real sample without dropping the current intensity.
         if (this.enabled && this.currentIntensity > 0.01 && this.graphReady && this.purrFilter) {
           this.stopPurrSource();
           this.startPurrLoopIfNeeded(targetCtx, true);
@@ -334,6 +364,7 @@ class CatAudio {
       } catch {
         if (this.ctx === targetCtx) {
           this.purrDecodeFailedCtx = targetCtx;
+          this.purrDecodeFailedKey = cacheKey;
         }
       }
     })()
@@ -349,14 +380,27 @@ class CatAudio {
   private startPurrLoopIfNeeded(ctx: AudioContext, randomOffset: boolean): void {
     this.clearPurrStopTimer();
     if (this.purrSource || !this.purrFilter) return;
+    if (this.characterVoiceMode === 'silent') return;
     const buf =
       this.purrBuffer ??
-      (this.purrFallbackBuffer ??= CatAudio.buildGlottalFallbackBuffer(ctx));
+      (this.characterVoiceMode === 'builtin'
+        ? (this.purrFallbackBuffer ??= CatAudio.buildGlottalFallbackBuffer(ctx))
+        : null);
+    if (!buf) {
+      this.prewarmPurrBuffer(ctx);
+      return;
+    }
     const src = ctx.createBufferSource();
     src.buffer = buf;
     src.loop = true;
     const rate =
-      this.currentPurrTone === 'chin' ? 0.94 : this.currentPurrTone === 'knead' ? 0.98 : 1.0;
+      this.characterVoiceMode === 'custom'
+        ? 1
+        : this.currentPurrTone === 'chin'
+          ? 0.94
+          : this.currentPurrTone === 'knead'
+            ? 0.98
+            : 1.0;
     src.playbackRate.value = rate;
     src.connect(this.purrFilter);
     const offset =
@@ -382,7 +426,14 @@ class CatAudio {
       this.purrFilter.frequency.setTargetAtTime(lpFreq, now, 0.12);
     }
     if (this.purrSource) {
-      const rate = tone === 'chin' ? 0.94 : tone === 'knead' ? 0.98 : 1.0;
+      const rate =
+        this.characterVoiceMode === 'custom'
+          ? 1
+          : tone === 'chin'
+            ? 0.94
+            : tone === 'knead'
+              ? 0.98
+              : 1.0;
       this.purrSource.playbackRate.setTargetAtTime(rate, now, 0.12);
     }
   }
@@ -408,7 +459,9 @@ class CatAudio {
       this.purrFilter = purrFilter;
       this.masterGain = master;
       this.graphReady = true;
-      this.prewarmPurrBuffer(ctx);
+      if (this.characterVoiceMode !== 'silent') {
+        this.prewarmPurrBuffer(ctx);
+      }
 
       return true;
     } catch {
@@ -462,6 +515,15 @@ class CatAudio {
         reject(err);
       }
     });
+  }
+
+  private static async fetchAudioBuffer(url: string): Promise<ArrayBuffer> {
+    if (!url) throw new Error('missing character voice URL');
+    const response = await fetch(url, { cache: 'no-store' });
+    if (!response.ok) {
+      throw new Error(`character voice fetch failed: ${response.status}`);
+    }
+    return response.arrayBuffer();
   }
 
   private prewarmTypingBuffers(): void {
@@ -628,10 +690,42 @@ class CatAudio {
   }
 
   /**
+   * Select the character-owned audio policy.
+   *
+   * `undefined` restores the built-in cat voice. `null` disables all built-in
+   * purr/boop/tail/land sounds. A URL replaces only the looped purr with the
+   * supplied character sample; built-in cat-specific sounds stay disabled.
+   */
+  public setCharacterVoice(purrUrl: string | null | undefined): void {
+    const url: string | null =
+      typeof purrUrl === 'string' && purrUrl.length > 0 ? purrUrl : null;
+    const mode: CharacterVoiceMode =
+      purrUrl === undefined ? 'builtin' : url ? 'custom' : 'silent';
+    if (mode === this.characterVoiceMode && url === this.characterVoiceUrl) return;
+
+    this.stopPurrSource();
+    this.currentIntensity = 0;
+    this.characterVoiceMode = mode;
+    this.characterVoiceUrl = url;
+    this.purrBuffer = null;
+    this.purrFallbackBuffer = null;
+    this.purrDecodePromise = null;
+    this.purrDecodeFailedCtx = null;
+    this.purrDecodeFailedKey = null;
+    if (mode !== 'silent' && this.ctx && this.graphReady) {
+      this.prewarmPurrBuffer(this.ctx);
+    }
+  }
+
+  /**
    * Smoothly drives real domestic cat purring (0 = silent, 1 = full cozy purr).
    * `tone`: 'normal' (head pet), 'chin' (deeper warm chest purr), 'knead' (gentle soft purr).
    */
   public setPurrIntensity(intensity: number, tone: 'normal' | 'chin' | 'knead' = 'normal'): void {
+    if (this.characterVoiceMode === 'silent') {
+      this.currentIntensity = 0;
+      return;
+    }
     const target = this.enabled ? Math.max(0, Math.min(1, intensity)) : 0;
     if (target <= 0.01 && !this.graphReady) return;
     if (Math.abs(target - this.currentIntensity) < 0.005 && tone === this.currentPurrTone) return;
@@ -672,6 +766,7 @@ class CatAudio {
    * Cute soft nose-boop squeak + tiny kitten sneeze puff!
    */
   public playBoopSneeze(): void {
+    if (this.characterVoiceMode !== 'builtin') return;
     const ctx = this.getReadyContext();
     if (!ctx) return;
 
@@ -743,6 +838,7 @@ class CatAudio {
    * Quick playful "bzzp / flick" chirp when tail is poked!
    */
   public playTailFlick(escalated = false): void {
+    if (this.characterVoiceMode !== 'builtin') return;
     const ctx = this.getReadyContext();
     if (!ctx) return;
 
@@ -777,6 +873,7 @@ class CatAudio {
    * Soft mochi "boing" thump on scruff landing!
    */
   public playSoftLand(): void {
+    if (this.characterVoiceMode !== 'builtin') return;
     const ctx = this.getReadyContext();
     if (!ctx) return;
 

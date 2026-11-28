@@ -1,5 +1,8 @@
 # KuroCat 自定义精灵皮肤分支
 
+> ⚠️ 本文档停留在 v0.1.3 的实现，有两处已过时：asset scope 现在用 `$DATA/kuro-cat-pet/**`（不是 `$APPDATA/**`），导入角色也已从「劫持大肥鱼」改为独立菜单条目。
+> 完整、最新的改造记录见 `../KuroCat-自定义形象-改造经验.md`，验证手顺见 `TEST.md`。
+
 基于 [qianyiai/KuroCat](https://github.com/qianyiai/KuroCat) **v5.1.3**（commit `1df9f3f`，MIT）的 fork，目的只有一个：**让桌宠形象可以由外部图片替换，不需要重新编译**。
 
 ## 与原版的差异

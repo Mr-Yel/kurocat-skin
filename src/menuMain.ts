@@ -3,7 +3,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
 import { DEFAULT_TAIL_KEY_IDS, type KeyboardOrientation, type TailKeyMode } from './catEngine';
 import { DEFAULT_BUILTIN_CATS, type CatSkinConfig } from './catSkins';
+import { discoverCharacters, isSpriteId, type SkinCharacter } from './customSkin';
 import type { KeyboardLayoutId } from './keyboardLayout';
+import {
+  OFFICIAL_UPDATES_DISABLED,
+  UPDATE_DISABLED_MESSAGE,
+  UPDATE_DISABLED_SHORT,
+} from './pet-extension/updateGuard';
 import {
   applyDomTranslations,
   isMacPlatform,
@@ -105,6 +111,7 @@ let settings: AppSettings = {
 };
 
 let catList: CatSkinConfig[] = [...DEFAULT_BUILTIN_CATS];
+let spriteCharacters: SkinCharacter[] = [];
 let resolvedBackendLocale: string | null = null;
 let sliderDragging = false;
 let opacitySliderDragging = false;
@@ -174,6 +181,16 @@ function switchTab(nextTab: MenuTabId): void {
 
 function renderFooterUpdateState(customLabel?: string, ready = false): void {
   const hint = document.getElementById('update-hint');
+  if (OFFICIAL_UPDATES_DISABLED) {
+    if (btnCheckUpdateEl) {
+      btnCheckUpdateEl.classList.remove('update-ready');
+      btnCheckUpdateEl.title = UPDATE_DISABLED_MESSAGE;
+    }
+    if (hint) {
+      hint.textContent = customLabel || UPDATE_DISABLED_SHORT;
+    }
+    return;
+  }
   const isReady = ready || Boolean(cachedUpdateInfo?.hasUpdate);
   if (btnCheckUpdateEl) {
     btnCheckUpdateEl.classList.toggle('update-ready', isReady);
@@ -219,6 +236,36 @@ function updateOpacitySliderVisual(opacityVal: number | undefined): void {
   }
   if (opacityValueEl) {
     opacityValueEl.textContent = `${pctNum}%`;
+  }
+}
+
+function isSpriteBreed(id: string): boolean {
+  return id === 'dafeiyu' || isSpriteId(id);
+}
+
+/** Merge the same external catalog used by the main window into this menu. */
+function mergeSpriteCharacters(): void {
+  catList = catList.filter((cat) => !isSpriteId(cat.id));
+  for (const character of spriteCharacters) {
+    if (catList.some((cat) => cat.id === character.id)) continue;
+    catList.push({
+      id: character.id,
+      name: character.name,
+      emoji: '🐾',
+      builtin: false,
+      furColor: '#c8f538',
+      eyeColorTop: '#222b2f',
+      accentColor: '#7ac7ff',
+    });
+  }
+}
+
+async function refreshSpriteCharacters(): Promise<void> {
+  try {
+    spriteCharacters = await discoverCharacters();
+    mergeSpriteCharacters();
+  } catch (err) {
+    console.warn('[KuroCat] menu character discovery skipped', err);
   }
 }
 
@@ -407,7 +454,7 @@ function syncUI(): void {
     btn.setAttribute('aria-checked', isActive ? 'true' : 'false');
   });
 
-  const isDafeiyu = settings.catBreed === 'dafeiyu';
+  const isDafeiyu = isSpriteBreed(settings.catBreed);
   const styleCardEl = document.getElementById('style-card');
   if (styleCardEl) {
     styleCardEl.classList.toggle('hidden', isDafeiyu);
@@ -554,6 +601,12 @@ async function createDesktopShortcut(): Promise<void> {
 }
 
 async function triggerManualUpdateCheck(): Promise<void> {
+  if (OFFICIAL_UPDATES_DISABLED) {
+    updateBusy = false;
+    renderFooterUpdateState(UPDATE_DISABLED_MESSAGE, false);
+    window.setTimeout(() => renderFooterUpdateState(), 4200);
+    return;
+  }
   if (updateBusy) return;
   if (cachedUpdateInfo?.hasUpdate) {
     if (cachedUpdateInfo.downloadUrl) {
@@ -854,6 +907,7 @@ async function bootstrap(): Promise<void> {
       DEFAULT_BUILTIN_CATS[2],
     ];
   }
+  await refreshSpriteCharacters();
   syncUI();
   renderFooterUpdateState();
   switchTab(activeTab);
@@ -943,11 +997,13 @@ async function bootstrap(): Promise<void> {
   await listen<CatSkinConfig[]>('kuro-cats', (ev) => {
     if (Array.isArray(ev.payload) && ev.payload.length > 0) {
       catList = ev.payload;
+      mergeSpriteCharacters();
       syncUI();
     }
   });
 
   await listen<UpdateProgressEvent>('kuro-update-status', (ev) => {
+    if (OFFICIAL_UPDATES_DISABLED) return;
     if (ev.payload.info) {
       cachedUpdateInfo = ev.payload.info;
     }
@@ -979,12 +1035,13 @@ async function bootstrap(): Promise<void> {
       if (Array.isArray(latestCats) && latestCats.length > 0) {
         catList = latestCats;
       }
-      if (cachedUpd) {
+      if (!OFFICIAL_UPDATES_DISABLED && cachedUpd) {
         cachedUpdateInfo = cachedUpd;
       }
       if (resolvedLoc) {
         resolvedBackendLocale = resolvedLoc;
       }
+      await refreshSpriteCharacters();
       syncUI();
       renderFooterUpdateState();
       if (tabBodyEl) tabBodyEl.scrollTop = 0;

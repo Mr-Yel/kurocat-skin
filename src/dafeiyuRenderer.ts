@@ -45,6 +45,8 @@ export interface DaFeiYuLayout {
   petEnergy: number;
   privacyMode: boolean;
   privacyTypingAt: number;
+  dragging: boolean;
+  dragVelocityX: number;
   is108: boolean;
   peekAmount?: number;
 }

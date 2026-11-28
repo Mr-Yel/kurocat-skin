@@ -14,6 +14,12 @@ import { AgentCompanionController, type AgentCompanionEvent } from './agentCompa
 import { DEFAULT_BUILTIN_CATS, type CatSkinConfig } from './catSkins';
 import { discoverCharacters, isSpriteId, type SkinCharacter } from './customSkin';
 import {
+  OFFICIAL_UPDATES_DISABLED,
+  UPDATE_DISABLED_MESSAGE,
+  UPDATE_DISABLED_SHORT,
+} from './pet-extension/updateGuard';
+import { installBrowserInputBridge } from './pet-extension/browserInputBridge';
+import {
   getKeyboardLayout,
   resolveKeyByVk,
   type KeyboardLayoutDef,
@@ -204,6 +210,7 @@ const tailModeBadgeEl = document.getElementById('tail-mode-badge') as HTMLSpanEl
 const tailKeysCountEl = document.getElementById('tail-keys-count') as HTMLSpanElement;
 const agentBubbleEl = document.getElementById('agent-bubble') as HTMLDivElement | null;
 const engine = new KuroCatEngine(canvas);
+installBrowserInputBridge(engine);
 engine.onDeepSleep = () => {
   void invoke('trim_idle_memory').catch(() => {});
 };
@@ -354,7 +361,16 @@ let settingsLoaded = false;
 function reconcileSpriteSelection(): void {
   if (!spritesLoaded || !settingsLoaded) return;
   const first = spriteCharacters[0];
-  if (!first) return;
+  if (!first) {
+    if (isSpriteId(settings.catBreed)) {
+      settings.catBreed = 'black';
+      mergeSpriteCharacters();
+      syncMenuUI();
+      activateRenderEngine();
+      void invoke('update_settings', { patch: settings }).catch(() => {});
+    }
+    return;
+  }
 
   const MIGRATION_KEY = 'kurocat.sprite.migrated';
   let migrated = false;
@@ -711,17 +727,19 @@ function syncMenuUI(): void {
 
   const updateLabelEl = document.getElementById('update-btn-label');
   if (updateLabelEl) {
-    updateLabelEl.textContent = t('menu.check_update', { ver: appVersion }).replace(/\s*v[\d.]+$/i, '');
+    updateLabelEl.textContent = OFFICIAL_UPDATES_DISABLED
+      ? '在线更新已禁用'
+      : t('menu.check_update', { ver: appVersion }).replace(/\s*v[\d.]+$/i, '');
   }
 
   const fpsCapNum = settings.fpsCap === 30 ? 30 : 0;
   engine.showKeyBubbles = settings.showKeyBubbles;
   const activeCharacter = findActiveCharacter();
   if (activeCharacter) {
-    engine.setCustomSpriteSkin(activeCharacter.sources, activeCharacter.options);
+    engine.setCustomCharacter(activeCharacter.pack);
     engine.setCatAppearance('dafeiyu');
   } else {
-    engine.setCustomSpriteSkin(null);
+    engine.setCustomCharacter(null);
     engine.setCatAppearance(activeCat?.id || 'black', activeCat);
   }
   engine.setHeadphones(shouldWearHeadphonesNow());
@@ -1040,6 +1058,7 @@ function saveAdminHintDismissed(): void {
 }
 
 function showPendingUpdateToast(): boolean {
+  if (OFFICIAL_UPDATES_DISABLED) return false;
   if (
     updateBusy ||
     !latestUpdateInfo?.hasUpdate ||
@@ -1107,6 +1126,16 @@ function showUpdateToast(
 }
 
 function handleUpdateProgressEvent(ev: UpdateProgressEvent, fromManual = false): void {
+  if (OFFICIAL_UPDATES_DISABLED) {
+    if (ev.stage === 'error') {
+      setUpdateHint(UPDATE_DISABLED_SHORT, 'error');
+      showUpdateToast(UPDATE_DISABLED_MESSAGE, {
+        autoHideMs: 5200,
+        kind: 'transient',
+      });
+    }
+    return;
+  }
   if (ev.info) {
     latestUpdateInfo = ev.info;
     appVersion = ev.info.currentVersion || appVersion;
@@ -1157,6 +1186,12 @@ function handleUpdateProgressEvent(ev: UpdateProgressEvent, fromManual = false):
 }
 
 async function triggerInstallUpdate(): Promise<void> {
+  if (OFFICIAL_UPDATES_DISABLED) {
+    closeContextMenu();
+    setUpdateHint(UPDATE_DISABLED_SHORT, 'error');
+    showUpdateToast(UPDATE_DISABLED_MESSAGE, { autoHideMs: 5200, kind: 'transient' });
+    return;
+  }
   if (updateBusy || !latestUpdateInfo || !latestUpdateInfo.hasUpdate) return;
   updateBusy = true;
   closeContextMenu();
@@ -1173,6 +1208,12 @@ async function triggerInstallUpdate(): Promise<void> {
 }
 
 async function triggerManualUpdateCheck(): Promise<void> {
+  if (OFFICIAL_UPDATES_DISABLED) {
+    closeContextMenu();
+    setUpdateHint(UPDATE_DISABLED_SHORT, 'error');
+    showUpdateToast(UPDATE_DISABLED_MESSAGE, { autoHideMs: 5200, kind: 'transient' });
+    return;
+  }
   if (updateBusy) return;
   // If we already know an update is ready, clicking the menu item immediately starts installing it!
   if (latestUpdateInfo?.hasUpdate && latestUpdateInfo.downloadUrl) {
@@ -1232,7 +1273,7 @@ async function bootstrap(): Promise<void> {
     }
     if (loadedVer) {
       appVersion = loadedVer;
-      setUpdateHint(`v${appVersion}`);
+      setUpdateHint(OFFICIAL_UPDATES_DISABLED ? UPDATE_DISABLED_SHORT : `v${appVersion}`);
     }
     if (resolvedLoc) {
       resolvedBackendLocale = resolvedLoc;
@@ -2153,18 +2194,20 @@ async function bootstrap(): Promise<void> {
     });
   }
 
-  // If the background updater already discovered a release before the webview finished loading, show it.
-  try {
-    const cachedUpd = await invoke<UpdateInfo | null>('get_cached_update_info');
-    if (cachedUpd?.hasUpdate) {
-      latestUpdateInfo = cachedUpd;
-      setUpdateHint(`⬆ v${cachedUpd.latestVersion}`, 'ready');
-      if (updateToastEl.classList.contains('hidden')) {
-        showPendingUpdateToast();
+  // Official releases would replace this custom build and remove its adapter.
+  if (!OFFICIAL_UPDATES_DISABLED) {
+    try {
+      const cachedUpd = await invoke<UpdateInfo | null>('get_cached_update_info');
+      if (cachedUpd?.hasUpdate) {
+        latestUpdateInfo = cachedUpd;
+        setUpdateHint(`⬆ v${cachedUpd.latestVersion}`, 'ready');
+        if (updateToastEl.classList.contains('hidden')) {
+          showPendingUpdateToast();
+        }
       }
+    } catch {
+      // Ignore if command unavailable.
     }
-  } catch {
-    // Ignore if command unavailable
   }
 }
 
@@ -2176,7 +2219,13 @@ void (async () => {
   try {
     spriteCharacters = await discoverCharacters();
     spritesLoaded = true;
-    if (spriteCharacters.length === 0) return;
+    if (
+      !('__TAURI_INTERNALS__' in window) &&
+      new URLSearchParams(window.location.search).has('skins') &&
+      spriteCharacters[0]
+    ) {
+      settings.catBreed = spriteCharacters[0].id;
+    }
     mergeSpriteCharacters();
     syncMenuUI();
     activateRenderEngine();

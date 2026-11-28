@@ -12,9 +12,9 @@ import { resolveCustomSkin, type CatSkinConfig, type ResolvedSkin } from './catS
 import {
   DaFeiYuRenderer,
   type DaFeiYuLayout,
-  type SpriteOptions,
-  type SpriteSources,
 } from './dafeiyuRenderer';
+import type { CharacterPack } from './pet-extension/characterPack';
+import { LayeredCharacterRenderer2D } from './pet-extension/layeredRenderer2d';
 
 export const LOGICAL_W = 420;
 export const LOGICAL_H = 440;
@@ -272,6 +272,7 @@ export class KuroCatEngine {
   private chromaKeyBg: string | null = null;
   private embedded = false;
   private dafeiyu = new DaFeiYuRenderer();
+  private externalCharacter = new LayeredCharacterRenderer2D();
   private catTail = {
     heldVks: new Set<number>(),
     targetX: 320,
@@ -934,6 +935,8 @@ export class KuroCatEngine {
   public setCatAppearance(breedId: string, skin?: CatSkinConfig | null): void {
     if (breedId !== 'dafeiyu' && this.catBreed === 'dafeiyu') {
       this.dafeiyu.releaseSprites();
+      this.externalCharacter.clear();
+      catAudio.setCharacterVoice(undefined);
     }
     if (breedId === 'dafeiyu') {
       this.catBreed = 'dafeiyu';
@@ -953,16 +956,14 @@ export class KuroCatEngine {
     this.wakeAction();
   }
 
-  /**
-   * Replace the BigFish artwork with an imported 4-frame sprite set.
-   * Pass `null` to restore the built-in sprites and all procedural extras.
-   */
-  public setCustomSpriteSkin(sources: SpriteSources | null, options?: Partial<SpriteOptions>): void {
-    this.dafeiyu.setSpriteSources(sources, options);
+  /** Attach an external character pack; null restores the selected built-in breed. */
+  public setCustomCharacter(pack: CharacterPack | null): void {
+    this.externalCharacter.setPack(pack);
+    catAudio.setCharacterVoice(pack ? pack.audio.purr ?? null : undefined);
   }
 
   public isCustomSpriteReady(): boolean {
-    return this.dafeiyu.isSpriteReady();
+    return this.externalCharacter.isReady();
   }
 
   public setHeadphones(active: boolean): void {
@@ -1042,6 +1043,8 @@ export class KuroCatEngine {
       petEnergy: this.petEnergy,
       privacyMode: this.privacyMode,
       privacyTypingAt: this.privacyTypingAt,
+      dragging: this.isDragging,
+      dragVelocityX: this.scruffDragVelX,
       is108: this.keyboardLayout === '108',
       peekAmount: Math.max(0, Math.min(1, this.peekAmount)),
     };
@@ -3069,7 +3072,20 @@ export class KuroCatEngine {
     this.squintAmount += (wantSquint - this.squintAmount) * (1 - Math.exp(-12 * dt));
     const wantPrivacy = this.privacyMode ? 1 : 0;
     this.privacyClose += (wantPrivacy - this.privacyClose) * (1 - Math.exp(-14 * dt));
-    if (this.catBreed !== 'dafeiyu' && !this.privacyMode && !scruffWanted) {
+    const externalPack = this.externalCharacter.getPack();
+    if (externalPack) {
+      if (
+        externalPack.audio.purr &&
+        !this.privacyMode &&
+        !scruffWanted &&
+        this.petEnergy > 0.3 &&
+        this.squintAmount > 0.25
+      ) {
+        catAudio.setPurrIntensity(this.squintAmount, 'normal');
+      } else {
+        catAudio.setPurrIntensity(0);
+      }
+    } else if (this.catBreed !== 'dafeiyu' && !this.privacyMode && !scruffWanted) {
       if (this.chinAmount > 0.25) {
         catAudio.setPurrIntensity(this.chinAmount, 'chin');
       } else if (this.petEnergy > 0.3 && this.squintAmount > 0.25) {
@@ -3098,7 +3114,9 @@ export class KuroCatEngine {
     this.earPerkSpring.step(earTarget, dt);
 
     if (this.catBreed === 'dafeiyu') {
-      this.dafeiyu.update(dt, now, this.buildDaFeiYuLayout());
+      if (!this.externalCharacter.hasPack()) {
+        this.dafeiyu.update(dt, now, this.buildDaFeiYuLayout());
+      }
     } else {
       // Update plush cat tail key-patting physics for keys near the tail
       if (this.privacyMode || this.asleep) {
@@ -3522,6 +3540,7 @@ export class KuroCatEngine {
       const now = performance.now();
       const layout = this.buildDaFeiYuLayout();
       const peekP = Math.max(0, Math.min(1, this.peekAmount));
+      const hasExternalCharacter = this.externalCharacter.hasPack();
 
       // Layer 1: BigFish sprite & Live2D eyes (rotated out cleanly from the screen border while peeking)
       ctx.save();
@@ -3531,7 +3550,11 @@ export class KuroCatEngine {
         ctx.rotate(rot);
         ctx.translate(-pivotX, -pivotY);
       }
-      this.dafeiyu.renderBody(ctx, now, layout, peekP);
+      if (hasExternalCharacter) {
+        this.externalCharacter.renderBack(ctx, this.lastDt, now, layout);
+      } else {
+        this.dafeiyu.renderBody(ctx, now, layout, peekP);
+      }
       ctx.restore();
 
       // Layer 2: Mini mouse & mechanical keyboard (slide & fade cleanly away in Edge Peek Mode)
@@ -3558,12 +3581,16 @@ export class KuroCatEngine {
         if (peekP > 0.01) {
           ctx.globalAlpha = Math.max(0, 1 - peekP * 3.0);
         }
-        this.dafeiyu.renderForeground(ctx, this.lastDt, now, layout);
+        if (hasExternalCharacter) {
+          this.externalCharacter.renderFront(ctx, this.lastDt, now, layout);
+        } else {
+          this.dafeiyu.renderForeground(ctx, this.lastDt, now, layout);
+        }
         ctx.restore();
       }
 
       // Layer 4: Screen-border-aligned chibi sailor hands wrapping flush around the vertical left/right edge
-      if (peekP > 0.22) {
+      if (!hasExternalCharacter && peekP > 0.22) {
         const s = Math.max(0.001, uniformScale);
         const leftEdge = -offsetX / s;
         const rightEdge = (cw - offsetX) / s;

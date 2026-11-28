@@ -6,6 +6,9 @@ use tauri::{AppHandle, Emitter};
 const QIANYI_API_LATEST: &str = "https://qianyi.one/kurocat/releases/latest.json";
 const REPO_API_LATEST: &str = "https://api.github.com/repos/qianyiai/KuroCat/releases/latest";
 const REPO_RELEASES_PAGE: &str = "https://github.com/qianyiai/KuroCat/releases/latest";
+const CUSTOM_BUILD_DISABLE_OFFICIAL_UPDATES: bool = true;
+const CUSTOM_BUILD_UPDATE_MESSAGE: &str =
+    "此自定义构建不提供官方在线更新，请手动替换为重新打包的版本";
 
 pub const CURRENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -690,6 +693,9 @@ fn fetch_latest_release_json() -> Result<String, String> {
 }
 
 pub fn check_latest_update() -> Result<UpdateInfo, String> {
+    if CUSTOM_BUILD_DISABLE_OFFICIAL_UPDATES {
+        return Err(CUSTOM_BUILD_UPDATE_MESSAGE.to_string());
+    }
     let raw_json = fetch_latest_release_json()?;
     let rel: GhRelease = serde_json::from_str(&raw_json)
         .map_err(|e| format!("解析最新版本信息失败: {}", e))?;
@@ -1117,6 +1123,9 @@ fn install_macos_update(app: &AppHandle, info: &UpdateInfo) -> Result<(), String
 }
 
 pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), String> {
+    if CUSTOM_BUILD_DISABLE_OFFICIAL_UPDATES {
+        return Err(CUSTOM_BUILD_UPDATE_MESSAGE.to_string());
+    }
     if !info.has_update {
         emit_progress(
             app,
@@ -1152,6 +1161,9 @@ pub fn perform_update_install(app: &AppHandle, info: UpdateInfo) -> Result<(), S
 }
 
 pub fn start_background_update_checker(app: AppHandle) {
+    if CUSTOM_BUILD_DISABLE_OFFICIAL_UPDATES {
+        return;
+    }
     std::thread::spawn(move || {
         // Gentle initial delay after launch so startup stays instant & quiet
         std::thread::sleep(std::time::Duration::from_secs(8));
@@ -1294,10 +1306,8 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires live internet access to GitHub API"]
-    fn live_check_latest_update_uses_native_http() {
-        let info = check_latest_update().expect("native WinHTTP release check should succeed");
-        assert!(!info.latest_version.is_empty());
-        assert!(info.download_url.is_some());
+    fn custom_build_refuses_official_update_check() {
+        let error = check_latest_update().expect_err("official updater must stay disabled");
+        assert_eq!(error, CUSTOM_BUILD_UPDATE_MESSAGE);
     }
 }
